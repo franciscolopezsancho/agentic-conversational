@@ -11,12 +11,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
 
-/**
- * This is a simple Akka Endpoint that returns "Hello World!".
- * Locally, you can access it by running `curl http://localhost:9000/hello`.
- */
-// Opened up for access from the public internet to make the service easy to try out.
-// For actual services meant for production this must be carefully considered, and often set more limited
 @Acl(allow = @Acl.Matcher(principal = Acl.Principal.INTERNET))
 @HttpEndpoint("/ask")
 public class ConversationEndpoint {
