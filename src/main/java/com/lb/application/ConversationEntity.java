@@ -2,75 +2,84 @@ package com.lb.application;
 
 import akka.javasdk.annotations.ComponentId;
 import akka.javasdk.eventsourcedentity.EventSourcedEntity;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.lb.domain.anthropic.AnthropicMessageResponseError;
-import com.lb.domain.anthropic.AnthropicResponse;
-import com.lb.domain.anthropic.AnthropicMessageResponseOk;
 import com.lb.domain.Conversation;
 import com.lb.domain.ConversationEvent;
+import com.zaxxer.hikari.HikariDataSource;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.agent.tool.ToolSpecifications;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.anthropic.AnthropicChatModel;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
+
+import static dev.langchain4j.model.anthropic.AnthropicChatModelName.CLAUDE_3_5_SONNET_20240620;
 
 @ComponentId("conversation")
 public class ConversationEntity extends EventSourcedEntity<Conversation, ConversationEvent> {
 
+    HikariDataSource dataSource;
     Logger log = LoggerFactory.getLogger(ConversationEntity.class);
-    ObjectMapper mapper = new ObjectMapper();
+    AnthropicChatModel model;
+    SQLTools sqlTools;
 
-    HttpClient client;
-    public ConversationEntity() {
-        client = HttpClient.newHttpClient();
+
+    @Override
+    public Conversation emptyState(){
+        return new Conversation(new ArrayList<>());
     }
 
-
-    public Effect<AnthropicResponse> ask(String question){
-        // TODO
-        // TODO use anthropic messages https://docs.anthropic.com/en/api/client-sdks#java
-        HttpRequest request = HttpRequest
-                .newBuilder(URI.create("https://api.anthropic.com/v1/messages"))
-                        .header("x-api-key", System.getenv("ANTHROPIC_API_KEY") ) //TODO add var
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString("{" +
-                                "\"model\": \"claude-3-5-sonnet-20241022\",\n" +
-                                "\"max_tokens\": 1024,\n" +
-                                "\"messages\": [\n" +
-                                "{\"role\": \"user\", \"content\": \" " + question+"\"}\n" +
-                                "]\n" +
-                                "}"))
+    public ConversationEntity(HikariDataSource dataSource) {
+        this.dataSource = dataSource;
+        model = AnthropicChatModel.builder()
+                .apiKey(System.getenv("ANTHROPIC_API_KEY"))
+                .modelName(CLAUDE_3_5_SONNET_20240620)
                 .build();
-
-        log.debug("Requesting uri: " + request.uri());
-        log.debug("Requesting method: " + request.method());
-        log.debug("Requesting headers: " + request.headers());
-        log.debug("Requesting body: " + request.bodyPublisher());
-
-        try {
-            HttpResponse<String> response =  client.send(request, HttpResponse.BodyHandlers.ofString());
-            log.debug("Response: " + response.statusCode());
-            log.debug("Response: " + response.body());
-            switch (response.statusCode()) {
-                case 200 -> {
-                    AnthropicMessageResponseOk aResponse = mapper.readValue(response.body(), AnthropicMessageResponseOk.class);
-                    return effects().reply(new AnthropicResponse(Optional.of(aResponse), Optional.empty()));
-                }
-                default -> {
-                   AnthropicMessageResponseError aResponse = mapper.readValue(response.body(), AnthropicMessageResponseError.class);
-                   return effects().reply(new AnthropicResponse(Optional.empty(), Optional.of(aResponse)));
-                }
-            }
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        sqlTools = new SQLTools(dataSource);
     }
 
+    public static String extractSqlQuery(String jsonResponse) throws JsonProcessingException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode rootNode = objectMapper.readTree(jsonResponse);
+        return rootNode.get("sql").asText().replaceAll(";","");
+    }
+
+    public Effect<String> ask(String question){
+        List<ToolSpecification> toolsSpecs = ToolSpecifications.toolSpecificationsFrom(sqlTools);
+        var questionWithContext = String.format("this is the question: %s. This is the context: %s",question, currentState());
+        ChatRequest chatRequest = ChatRequest.builder()
+                .messages(new UserMessage(questionWithContext))
+                .toolSpecifications(toolsSpecs)
+                .build();
+        ChatResponse answer = model.chat(chatRequest);
+
+        log.debug(answer.toString());
+
+        StringBuilder toolResponse = new StringBuilder();
+            answer.aiMessage().toolExecutionRequests().forEach( toolExecutionRequest -> {
+                if(toolExecutionRequest.name().equals("executeQuery")){
+                    try {
+                        toolResponse.append(sqlTools.executeQuery(extractSqlQuery(toolExecutionRequest.arguments())));
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            });
+
+        String finalResponse = answer.aiMessage().text() + toolResponse;
+        var event = new ConversationEvent.AddedContext(String.format("question at %d is %s. And response is %s", System.currentTimeMillis(), question, finalResponse));
+        return effects()
+                .persist(event)
+                .thenReply(__ -> finalResponse);
+    }
 
     @Override
     public Conversation applyEvent(ConversationEvent conversationEvent) {
