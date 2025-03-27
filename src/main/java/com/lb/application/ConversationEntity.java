@@ -10,7 +10,6 @@ import com.lb.domain.ConversationEvent;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.agent.tool.ToolSpecifications;
-import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
@@ -20,6 +19,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static dev.langchain4j.model.anthropic.AnthropicChatModelName.CLAUDE_3_5_SONNET_20240620;
 
@@ -46,11 +46,7 @@ public class ConversationEntity extends EventSourcedEntity<Conversation, Convers
         sqlTools = new SQLTools(dataSource);
     }
 
-    public static String extractSqlQuery(String jsonResponse) throws JsonProcessingException {
-        ObjectMapper objectMapper = new ObjectMapper();
-        JsonNode rootNode = objectMapper.readTree(jsonResponse);
-        return rootNode.get("sql").asText().replaceAll(";","");
-    }
+
 
     public Effect<String> ask(String question){
         List<ToolSpecification> toolsSpecs = ToolSpecifications.toolSpecificationsFrom(sqlTools);
@@ -63,16 +59,11 @@ public class ConversationEntity extends EventSourcedEntity<Conversation, Convers
 
         log.debug(answer.toString());
 
-        StringBuilder toolResponse = new StringBuilder();
-            answer.aiMessage().toolExecutionRequests().forEach( toolExecutionRequest -> {
-                if(toolExecutionRequest.name().equals("executeQuery")){
-                    try {
-                        toolResponse.append(sqlTools.executeQuery(extractSqlQuery(toolExecutionRequest.arguments())));
-                    } catch (JsonProcessingException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-            });
+        Optional<String> toolResponse =  answer.aiMessage().toolExecutionRequests()
+                    .stream()
+                    .filter( toolExecutionRequest -> toolExecutionRequest.name().equals("executeQuery"))
+                    .findFirst() // Should be only one
+                    .flatMap(sqlTools::executeQuerySafely);
 
         String finalResponse = answer.aiMessage().text() + toolResponse;
         var event = new ConversationEvent.AddedContext(String.format("question at %d is %s. And response is %s", System.currentTimeMillis(), question, finalResponse));

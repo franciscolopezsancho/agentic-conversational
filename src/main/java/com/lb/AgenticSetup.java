@@ -22,6 +22,7 @@ public class AgenticSetup implements ServiceSetup {
         config.setUsername(user);
         config.setPassword(pass);
 
+        //TODO add close
         var datasource = new HikariDataSource(config);
             return new DependencyProvider() {
                 @Override
