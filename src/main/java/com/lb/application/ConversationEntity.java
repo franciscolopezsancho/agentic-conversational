@@ -46,8 +46,6 @@ public class ConversationEntity extends EventSourcedEntity<Conversation, Convers
         sqlTools = new SQLTools(dataSource);
     }
 
-
-
     public Effect<String> ask(String question){
         List<ToolSpecification> toolsSpecs = ToolSpecifications.toolSpecificationsFrom(sqlTools);
         var questionWithContext = String.format("this is the question: %s. This is the context: %s",question, currentState());
@@ -65,7 +63,7 @@ public class ConversationEntity extends EventSourcedEntity<Conversation, Convers
                     .findFirst() // Should be only one
                     .flatMap(sqlTools::executeQuerySafely);
 
-        String finalResponse = answer.aiMessage().text() + toolResponse;
+        String finalResponse = answer.aiMessage().text() + toolResponse.orElse("");
         var event = new ConversationEvent.AddedContext(String.format("question at %d is %s. And response is %s", System.currentTimeMillis(), question, finalResponse));
         return effects()
                 .persist(event)
